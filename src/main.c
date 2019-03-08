@@ -122,12 +122,7 @@ mat4_perspective(float fovy, float aspect_ratio, float znear, float zfar) {
 }
 
 static inline mat4_t mat4_mul(mat4_t left, mat4_t right) {
-  mat4_t result = (mat4_t){.columns = {
-                               {0, 0, 0, 0},
-                               {0, 0, 0, 0},
-                               {0, 0, 0, 0},
-                               {0, 0, 0, 0},
-                           }};
+  mat4_t result = {0};
   for (unsigned char i = 0; i < 4; i++) {
     for (unsigned char j = 0; j < 4; j++) {
       for (unsigned char p = 0; p < 4; p++) {
@@ -2146,7 +2141,8 @@ void cubemap_destroy(cubemap_t *cubemap) {
   vmaDestroyImage(g_gpu_allocator, cubemap->image, cubemap->allocation);
 }
 
-void save_cubemap(cubemap_t *cubemap, const char *prefix) {
+void save_cubemap(
+    cubemap_t *cubemap, const char *prefix1, const char *prefix2) {
   size_t hdr_size = cubemap->width * cubemap->height * 4 * sizeof(float);
 
   VkBuffer staging_buffer;
@@ -2223,9 +2219,10 @@ void save_cubemap(cubemap_t *cubemap, const char *prefix) {
       // Save side
       char filename[512] = "";
       if (cubemap->mip_levels > 1) {
-        sprintf(filename, "%s_side_%d_mip%d.hdr", prefix, layer, level);
+        sprintf(
+            filename, "%s%s_side_%d_mip%d.hdr", prefix1, prefix2, layer, level);
       } else {
-        sprintf(filename, "%s_side_%d.hdr", prefix, layer);
+        sprintf(filename, "%s%s_side_%d.hdr", prefix1, prefix2, layer);
       }
 
       stbi_write_hdr(
@@ -2254,17 +2251,22 @@ int main(int argc, char *argv[]) {
   char *skybox_prefix = "skybox";
   char *irradiance_prefix = "irradiance";
   char *radiance_prefix = "radiance";
+  char *prefix = "";
 
   if (argc >= 3) {
-    skybox_prefix = argv[2];
+    prefix = argv[2];
   }
 
   if (argc >= 4) {
-    irradiance_prefix = argv[3];
+    skybox_prefix = argv[3];
   }
 
   if (argc >= 5) {
-    radiance_prefix = argv[4];
+    irradiance_prefix = argv[4];
+  }
+
+  if (argc >= 6) {
+    radiance_prefix = argv[5];
   }
 
   vulkan_setup();
@@ -2284,7 +2286,7 @@ int main(int argc, char *argv[]) {
       "../shaders/out/skybox.frag.spv");
   printf("Done rendering skybox\n");
 
-  save_cubemap(&skybox_cubemap, skybox_prefix);
+  save_cubemap(&skybox_cubemap, prefix, skybox_prefix);
   printf("Done saving skybox\n");
 
   // Irradiance
@@ -2299,7 +2301,7 @@ int main(int argc, char *argv[]) {
         "../shaders/out/irradiance.frag.spv");
     printf("Done rendering irradiance\n");
 
-    save_cubemap(&irradiance_cubemap, irradiance_prefix);
+    save_cubemap(&irradiance_cubemap, prefix, irradiance_prefix);
     printf("Done saving irradiance\n");
 
     cubemap_destroy(&irradiance_cubemap);
@@ -2320,7 +2322,7 @@ int main(int argc, char *argv[]) {
         radiance_mip_count);
     printf("Done rendering radiance with %d mip levels\n", radiance_mip_count);
 
-    save_cubemap(&radiance_cubemap, radiance_prefix);
+    save_cubemap(&radiance_cubemap, prefix, radiance_prefix);
     printf("Done saving radiance\n");
 
     cubemap_destroy(&radiance_cubemap);
