@@ -42,10 +42,10 @@ typedef union mat4_t {
   float columns[4][4];
 } mat4_t;
 
-typedef struct camera_uniform_t {
-  mat4_t view;
-  mat4_t proj;
-} camera_uniform_t;
+typedef struct push_constant_t {
+  mat4_t mvp;
+  float roughness;
+} push_constant_t;
 
 typedef struct cubemap_t {
   VkImage image;
@@ -57,6 +57,8 @@ typedef struct cubemap_t {
   uint32_t height;
 
   VkFormat format;
+
+  uint32_t mip_levels;
 } cubemap_t;
 
 // clang-format off
@@ -104,7 +106,7 @@ float to_radians(float degrees) {
   return degrees * (3.14159265358979323846 / 180.0f);
 }
 
-mat4_t
+static inline mat4_t
 mat4_perspective(float fovy, float aspect_ratio, float znear, float zfar) {
   mat4_t result = {0};
 
@@ -116,6 +118,23 @@ mat4_perspective(float fovy, float aspect_ratio, float znear, float zfar) {
   result.columns[2][3] = -1.0f;
   result.columns[3][2] = -(2.0 * zfar * znear) / (zfar - znear);
 
+  return result;
+}
+
+static inline mat4_t mat4_mul(mat4_t left, mat4_t right) {
+  mat4_t result = (mat4_t){.columns = {
+                               {0, 0, 0, 0},
+                               {0, 0, 0, 0},
+                               {0, 0, 0, 0},
+                               {0, 0, 0, 0},
+                           }};
+  for (unsigned char i = 0; i < 4; i++) {
+    for (unsigned char j = 0; j < 4; j++) {
+      for (unsigned char p = 0; p < 4; p++) {
+        result.columns[i][j] += left.columns[i][p] * right.columns[p][j];
+      }
+    }
+  }
   return result;
 }
 
@@ -1353,8 +1372,8 @@ static void copy_side_image_to_cubemap(
   copy_region.dstSubresource.layerCount = 1;
   copy_region.dstOffset = (VkOffset3D){0, 0, 0};
 
-  copy_region.extent.width = cubemap->width;
-  copy_region.extent.height = cubemap->height;
+  copy_region.extent.width = (uint32_t)(cubemap->width / pow(2, level));
+  copy_region.extent.height = (uint32_t)(cubemap->height / pow(2, level));
   copy_region.extent.depth = 1;
 
   // Put image copy into command buffer
@@ -1529,8 +1548,8 @@ static void render_equirec_to_cubemap(
   }
 
   // Camera matrices
-  camera_uniform_t camera_ubo;
-  camera_ubo.proj = mat4_perspective(to_radians(90.0f), 1.0f, 0.1f, 10.0f);
+  push_constant_t pc;
+  mat4_t proj = mat4_perspective(to_radians(90.0f), 1.0f, 0.1f, 10.0f);
 
   canvas_t canvas;
   canvas_init(
@@ -1646,15 +1665,15 @@ static void render_equirec_to_cubemap(
   for (size_t i = 0; i < ARRAYSIZE(camera_views); i++) {
     canvas_begin(&canvas, command_buffer);
 
-    camera_ubo.view = camera_views[i];
+    pc.mvp = mat4_mul(camera_views[i], proj);
 
     vkCmdPushConstants(
         command_buffer,
         pipeline_layout,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
-        sizeof(camera_uniform_t),
-        &camera_ubo);
+        sizeof(push_constant_t),
+        &pc);
 
     vkCmdDraw(command_buffer, 36, 1, 0, 0);
 
@@ -1710,8 +1729,7 @@ static void render_cubemap_to_cubemap(
     cubemap_t *dest_cubemap,
     cubemap_t *source_cubemap,
     const char *vert_path,
-    const char *frag_path,
-    uint32_t level) {
+    const char *frag_path) {
   // Create hdrDescriptorSet
   VkDescriptorSet descriptor_set;
   {
@@ -1749,8 +1767,8 @@ static void render_cubemap_to_cubemap(
   }
 
   // Camera matrices
-  camera_uniform_t camera_ubo;
-  camera_ubo.proj = mat4_perspective(to_radians(90.0f), 1.0f, 0.1f, 10.0f);
+  push_constant_t pc;
+  mat4_t proj = mat4_perspective(to_radians(90.0f), 1.0f, 0.1f, 10.0f);
 
   canvas_t canvas;
   canvas_init(
@@ -1879,25 +1897,39 @@ static void render_cubemap_to_cubemap(
       0,
       NULL);
 
-  for (size_t i = 0; i < ARRAYSIZE(camera_views); i++) {
-    canvas_begin(&canvas, command_buffer);
+  for (uint32_t level = 0; level < dest_cubemap->mip_levels; level++) {
+    for (size_t i = 0; i < ARRAYSIZE(camera_views); i++) {
+      canvas_begin(&canvas, command_buffer);
 
-    camera_ubo.view = camera_views[i];
+      VkViewport viewport = (VkViewport){
+          0.0f,                                        // x
+          0.0f,                                        // y
+          (float)dest_cubemap->width / pow(2, level),  // width
+          (float)dest_cubemap->height / pow(2, level), // height
+          0.0f,                                        // minDepth
+          1.0f,                                        // maxDepth
+      };
 
-    vkCmdPushConstants(
-        command_buffer,
-        pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(camera_uniform_t),
-        &camera_ubo);
+      vkCmdSetViewport(command_buffer, 0, 1, &viewport);
 
-    vkCmdDraw(command_buffer, 36, 1, 0, 0);
+      pc.mvp = mat4_mul(camera_views[i], proj);
+      pc.roughness = (float)level / (float)(dest_cubemap->mip_levels - 1);
 
-    canvas_end(&canvas, command_buffer);
+      vkCmdPushConstants(
+          command_buffer,
+          pipeline_layout,
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          0,
+          sizeof(push_constant_t),
+          &pc);
 
-    copy_side_image_to_cubemap(
-        command_buffer, canvas.image, dest_cubemap, i, level);
+      vkCmdDraw(command_buffer, 36, 1, 0, 0);
+
+      canvas_end(&canvas, command_buffer);
+
+      copy_side_image_to_cubemap(
+          command_buffer, canvas.image, dest_cubemap, i, level);
+    }
   }
 
   VK_CHECK(vkEndCommandBuffer(command_buffer));
@@ -2038,6 +2070,7 @@ void cubemap_init_skybox_from_hdr_equirec(
   skybox_cubemap->width = width;
   skybox_cubemap->height = height;
   skybox_cubemap->format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  skybox_cubemap->mip_levels = 1;
 
   create_cubemap_image(
       &skybox_cubemap->image,
@@ -2062,6 +2095,7 @@ void cubemap_init_irradiance_from_skybox(
   irradiance_cubemap->width = width;
   irradiance_cubemap->height = height;
   irradiance_cubemap->format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  irradiance_cubemap->mip_levels = 1;
 
   create_cubemap_image(
       &irradiance_cubemap->image,
@@ -2074,7 +2108,34 @@ void cubemap_init_irradiance_from_skybox(
       1);
 
   render_cubemap_to_cubemap(
-      irradiance_cubemap, skybox_cubemap, vert_path, frag_path, 0);
+      irradiance_cubemap, skybox_cubemap, vert_path, frag_path);
+}
+
+void cubemap_init_radiance_from_skybox(
+    cubemap_t *radiance_cubemap,
+    cubemap_t *skybox_cubemap,
+    const uint32_t width,
+    const uint32_t height,
+    const char *vert_path,
+    const char *frag_path,
+    uint32_t mip_levels) {
+  radiance_cubemap->width = width;
+  radiance_cubemap->height = height;
+  radiance_cubemap->format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  radiance_cubemap->mip_levels = mip_levels;
+
+  create_cubemap_image(
+      &radiance_cubemap->image,
+      &radiance_cubemap->allocation,
+      &radiance_cubemap->image_view,
+      &radiance_cubemap->sampler,
+      radiance_cubemap->format,
+      width,
+      height,
+      radiance_cubemap->mip_levels);
+
+  render_cubemap_to_cubemap(
+      radiance_cubemap, skybox_cubemap, vert_path, frag_path);
 }
 
 void cubemap_destroy(cubemap_t *cubemap) {
@@ -2102,70 +2163,78 @@ void save_cubemap(cubemap_t *cubemap, const char *prefix) {
   void *staging_memory_pointer;
   vmaMapMemory(g_gpu_allocator, staging_allocation, &staging_memory_pointer);
 
-  for (uint32_t layer = 0; layer < 6; layer++) {
-    VkCommandBuffer command_buffer = begin_single_time_command_buffer();
+  for (uint32_t level = 0; level < cubemap->mip_levels; level++) {
+    for (uint32_t layer = 0; layer < 6; layer++) {
+      VkCommandBuffer command_buffer = begin_single_time_command_buffer();
 
-    VkImageSubresourceRange subresource_range = {};
-    subresource_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    subresource_range.baseMipLevel = 0;
-    subresource_range.levelCount = 1;
-    subresource_range.baseArrayLayer = layer;
-    subresource_range.layerCount = 1;
+      VkImageSubresourceRange subresource_range = {};
+      subresource_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      subresource_range.baseMipLevel = level;
+      subresource_range.levelCount = 1;
+      subresource_range.baseArrayLayer = layer;
+      subresource_range.layerCount = 1;
 
-    set_image_layout(
-        command_buffer,
-        cubemap->image,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        subresource_range,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      set_image_layout(
+          command_buffer,
+          cubemap->image,
+          VK_IMAGE_LAYOUT_UNDEFINED,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          subresource_range,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
-    VkBufferImageCopy region = (VkBufferImageCopy){
-        0, // bufferOffset
-        0, // bufferRowLength
-        0, // bufferImageHeight
-        {
-            VK_IMAGE_ASPECT_COLOR_BIT,        // aspectMask
-            0,                                // mipLevel
-            layer,                            // baseArrayLayer
-            1,                                // layerCount
-        },                                    // imageSubresource
-        {0, 0, 0},                            // imageOffset
-        {cubemap->width, cubemap->height, 1}, // imageExtent
-    };
+      VkBufferImageCopy region = (VkBufferImageCopy){
+          0, // bufferOffset
+          0, // bufferRowLength
+          0, // bufferImageHeight
+          {
+              VK_IMAGE_ASPECT_COLOR_BIT, // aspectMask
+              level,                     // mipLevel
+              layer,                     // baseArrayLayer
+              1,                         // layerCount
+          },                             // imageSubresource
+          {0, 0, 0},                     // imageOffset
+          {cubemap->width / pow(2, level),
+           cubemap->height / pow(2, level),
+           1}, // imageExtent
+      };
 
-    vkCmdCopyImageToBuffer(
-        command_buffer,
-        cubemap->image,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        staging_buffer,
-        1,
-        &region);
+      vkCmdCopyImageToBuffer(
+          command_buffer,
+          cubemap->image,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          staging_buffer,
+          1,
+          &region);
 
-    set_image_layout(
-        command_buffer,
-        cubemap->image,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        subresource_range,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      set_image_layout(
+          command_buffer,
+          cubemap->image,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          subresource_range,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
-    end_single_time_command_buffer(command_buffer);
+      end_single_time_command_buffer(command_buffer);
 
-    VK_CHECK(vkDeviceWaitIdle(g_device));
+      VK_CHECK(vkDeviceWaitIdle(g_device));
 
-    // Save side
-    char filename[512] = "";
-    sprintf(filename, "%s_side_%d.hdr", prefix, layer);
+      // Save side
+      char filename[512] = "";
+      if (cubemap->mip_levels > 1) {
+        sprintf(filename, "%s_side_%d_mip%d.hdr", prefix, layer, level);
+      } else {
+        sprintf(filename, "%s_side_%d.hdr", prefix, layer);
+      }
 
-    stbi_write_hdr(
-        filename,
-        (int)cubemap->width,
-        (int)cubemap->height,
-        4,
-        (float *)staging_memory_pointer);
+      stbi_write_hdr(
+          filename,
+          (int)cubemap->width / pow(2, level),
+          (int)cubemap->height / pow(2, level),
+          4,
+          (float *)staging_memory_pointer);
+    }
   }
 
   VK_CHECK(vkDeviceWaitIdle(g_device));
@@ -2176,13 +2245,15 @@ int main(int argc, char *argv[]) {
   if (argc <= 1) {
     // TODO: print help
     printf(
-        "Usage: %s <path-to-skybox.hdr> [skybox prefix] [irradiance prefix]\n",
+        "Usage: %s <path-to-skybox.hdr> [skybox prefix] [irradiance prefix] "
+        "[radiance prefix]\n",
         argv[0]);
     return 0;
   }
 
   char *skybox_prefix = "skybox";
   char *irradiance_prefix = "irradiance";
+  char *radiance_prefix = "radiance";
 
   if (argc >= 3) {
     skybox_prefix = argv[2];
@@ -2190,6 +2261,10 @@ int main(int argc, char *argv[]) {
 
   if (argc >= 4) {
     irradiance_prefix = argv[3];
+  }
+
+  if (argc >= 5) {
+    radiance_prefix = argv[4];
   }
 
   vulkan_setup();
@@ -2228,6 +2303,27 @@ int main(int argc, char *argv[]) {
     printf("Done saving irradiance\n");
 
     cubemap_destroy(&irradiance_cubemap);
+  }
+
+  // Radiance
+  {
+    uint32_t radiance_dim = 256;
+    uint32_t radiance_mip_count = floor(log2(radiance_dim)) + 1;
+    cubemap_t radiance_cubemap;
+    cubemap_init_radiance_from_skybox(
+        &radiance_cubemap,
+        &skybox_cubemap,
+        radiance_dim,
+        radiance_dim,
+        "../shaders/out/skybox.vert.spv",
+        "../shaders/out/radiance.frag.spv",
+        radiance_mip_count);
+    printf("Done rendering radiance with %d mip levels\n", radiance_mip_count);
+
+    save_cubemap(&radiance_cubemap, radiance_prefix);
+    printf("Done saving radiance\n");
+
+    cubemap_destroy(&radiance_cubemap);
   }
 
   cubemap_destroy(&skybox_cubemap);
