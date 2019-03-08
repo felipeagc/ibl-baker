@@ -7,7 +7,7 @@ out:
 	mkdir -p $@
 
 out/%.spv: %
-	glslc $< -o $@
+	glslc -O $< -o $@
 
 clean:
 	rm -r out
