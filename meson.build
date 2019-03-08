@@ -9,7 +9,6 @@ sources = [
 
 deps = [
   dependency('vulkan'),
-  dependency('sdl2'),
   cc.find_library('m', required : false)
 ]
 

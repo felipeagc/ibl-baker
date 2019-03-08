@@ -2220,7 +2220,7 @@ void save_cubemap(
       char filename[512] = "";
       if (cubemap->mip_levels > 1) {
         sprintf(
-            filename, "%s%s_side_%d_mip%d.hdr", prefix1, prefix2, layer, level);
+            filename, "%s%s_side_%d_mip_%d.hdr", prefix1, prefix2, layer, level);
       } else {
         sprintf(filename, "%s%s_side_%d.hdr", prefix1, prefix2, layer);
       }
