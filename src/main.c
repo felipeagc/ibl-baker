@@ -696,21 +696,18 @@ check_physical_device_properties(VkPhysicalDevice physical_device) {
 }
 
 static inline void create_instance() {
-  printf("Creating vulkan instance\n");
 #ifdef ENABLE_VALIDATION
   if (check_validation_layer_support()) {
     printf("Using validation layers\n");
   } else {
     printf("Validation layers requested but not available\n");
   }
-#else
-  printf("Not using validation layers\n");
 #endif
 
   VkApplicationInfo appInfo = {};
   appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   appInfo.pNext = NULL;
-  appInfo.pApplicationName = "App";
+  appInfo.pApplicationName = "IBL Baker";
   appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
   appInfo.pEngineName = "No engine";
   appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
@@ -2175,10 +2172,29 @@ void save_cubemap(cubemap_t *cubemap, const char *prefix) {
   vmaDestroyBuffer(g_gpu_allocator, staging_buffer, staging_allocation);
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+  if (argc <= 1) {
+    // TODO: print help
+    printf(
+        "Usage: %s <path-to-skybox.hdr> [skybox prefix] [irradiance prefix]\n",
+        argv[0]);
+    return 0;
+  }
+
+  char *skybox_prefix = "skybox";
+  char *irradiance_prefix = "irradiance";
+
+  if (argc >= 3) {
+    skybox_prefix = argv[2];
+  }
+
+  if (argc >= 4) {
+    irradiance_prefix = argv[3];
+  }
+
   vulkan_setup();
 
-  char *path = "../skybox.hdr";
+  char *path = argv[1];
   uint32_t width = 512;
   uint32_t height = 512;
 
@@ -2193,7 +2209,7 @@ int main() {
       "../shaders/out/skybox.frag.spv");
   printf("Done rendering skybox\n");
 
-  save_cubemap(&skybox_cubemap, "skybox");
+  save_cubemap(&skybox_cubemap, skybox_prefix);
   printf("Done saving skybox\n");
 
   // Irradiance
@@ -2208,7 +2224,7 @@ int main() {
         "../shaders/out/irradiance.frag.spv");
     printf("Done rendering irradiance\n");
 
-    save_cubemap(&irradiance_cubemap, "irradiance");
+    save_cubemap(&irradiance_cubemap, irradiance_prefix);
     printf("Done saving irradiance\n");
 
     cubemap_destroy(&irradiance_cubemap);
