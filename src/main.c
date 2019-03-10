@@ -1,3 +1,4 @@
+#include "env_file.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -108,7 +109,7 @@ float to_radians(float degrees) {
 
 static inline mat4_t
 mat4_perspective(float fovy, float aspect_ratio, float znear, float zfar) {
-  mat4_t result = {0};
+  mat4_t result = {{0}};
 
   float tan_half_fovy = tan(fovy / 2.0f);
 
@@ -122,7 +123,7 @@ mat4_perspective(float fovy, float aspect_ratio, float znear, float zfar) {
 }
 
 static inline mat4_t mat4_mul(mat4_t left, mat4_t right) {
-  mat4_t result = {0};
+  mat4_t result = {{0}};
   for (unsigned char i = 0; i < 4; i++) {
     for (unsigned char j = 0; j < 4; j++) {
       for (unsigned char p = 0; p < 4; p++) {
@@ -2141,8 +2142,25 @@ void cubemap_destroy(cubemap_t *cubemap) {
   vmaDestroyImage(g_gpu_allocator, cubemap->image, cubemap->allocation);
 }
 
-void save_cubemap(
-    cubemap_t *cubemap, const char *prefix1, const char *prefix2) {
+void image_write_func(void *context, void *data, int size) {
+  env_save_bundle_t *bundle = context;
+  if (bundle->cap == 0) {
+    bundle->data = malloc((size_t)size);
+    bundle->cap = (size_t)size;
+  }
+  if (bundle->cap <= (size_t)size + bundle->size) {
+    bundle->data = realloc(bundle->data, (size_t)size + (bundle->cap * 2));
+    bundle->cap *= 2;
+  }
+  memcpy(&bundle->data[bundle->size], data, (size_t)size);
+  bundle->size += (size_t)size;
+}
+
+void save_cubemap_mem(
+    cubemap_t *cubemap,
+    env_save_bundle_t *bundle,
+    uint32_t layer,
+    uint32_t level) {
   size_t hdr_size = cubemap->width * cubemap->height * 4 * sizeof(float);
 
   VkBuffer staging_buffer;
@@ -2159,119 +2177,182 @@ void save_cubemap(
   void *staging_memory_pointer;
   vmaMapMemory(g_gpu_allocator, staging_allocation, &staging_memory_pointer);
 
-  for (uint32_t level = 0; level < cubemap->mip_levels; level++) {
-    for (uint32_t layer = 0; layer < 6; layer++) {
-      VkCommandBuffer command_buffer = begin_single_time_command_buffer();
+  VkCommandBuffer command_buffer = begin_single_time_command_buffer();
 
-      VkImageSubresourceRange subresource_range = {};
-      subresource_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      subresource_range.baseMipLevel = level;
-      subresource_range.levelCount = 1;
-      subresource_range.baseArrayLayer = layer;
-      subresource_range.layerCount = 1;
+  VkImageSubresourceRange subresource_range = {};
+  subresource_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  subresource_range.baseMipLevel = level;
+  subresource_range.levelCount = 1;
+  subresource_range.baseArrayLayer = layer;
+  subresource_range.layerCount = 1;
 
-      set_image_layout(
-          command_buffer,
-          cubemap->image,
-          VK_IMAGE_LAYOUT_UNDEFINED,
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          subresource_range,
-          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+  set_image_layout(
+      command_buffer,
+      cubemap->image,
+      VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      subresource_range,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
-      VkBufferImageCopy region = (VkBufferImageCopy){
-          0, // bufferOffset
-          0, // bufferRowLength
-          0, // bufferImageHeight
-          {
-              VK_IMAGE_ASPECT_COLOR_BIT, // aspectMask
-              level,                     // mipLevel
-              layer,                     // baseArrayLayer
-              1,                         // layerCount
-          },                             // imageSubresource
-          {0, 0, 0},                     // imageOffset
-          {cubemap->width / pow(2, level),
-           cubemap->height / pow(2, level),
-           1}, // imageExtent
-      };
+  VkBufferImageCopy region = (VkBufferImageCopy){
+      0, // bufferOffset
+      0, // bufferRowLength
+      0, // bufferImageHeight
+      {
+          VK_IMAGE_ASPECT_COLOR_BIT, // aspectMask
+          level,                     // mipLevel
+          layer,                     // baseArrayLayer
+          1,                         // layerCount
+      },                             // imageSubresource
+      {0, 0, 0},                     // imageOffset
+      {cubemap->width / pow(2, level),
+       cubemap->height / pow(2, level),
+       1}, // imageExtent
+  };
 
-      vkCmdCopyImageToBuffer(
-          command_buffer,
-          cubemap->image,
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          staging_buffer,
-          1,
-          &region);
+  vkCmdCopyImageToBuffer(
+      command_buffer,
+      cubemap->image,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      staging_buffer,
+      1,
+      &region);
 
-      set_image_layout(
-          command_buffer,
-          cubemap->image,
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          subresource_range,
-          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+  set_image_layout(
+      command_buffer,
+      cubemap->image,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      subresource_range,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
-      end_single_time_command_buffer(command_buffer);
+  end_single_time_command_buffer(command_buffer);
 
-      VK_CHECK(vkDeviceWaitIdle(g_device));
+  VK_CHECK(vkDeviceWaitIdle(g_device));
 
-      // Save side
-      char filename[512] = "";
-      if (cubemap->mip_levels > 1) {
-        sprintf(
-            filename, "%s%s_side_%d_mip_%d.hdr", prefix1, prefix2, layer, level);
-      } else {
-        sprintf(filename, "%s%s_side_%d.hdr", prefix1, prefix2, layer);
-      }
-
-      stbi_write_hdr(
-          filename,
-          (int)cubemap->width / pow(2, level),
-          (int)cubemap->height / pow(2, level),
-          4,
-          (float *)staging_memory_pointer);
-    }
-  }
+  // Save side
+  stbi_write_hdr_to_func(
+      image_write_func,
+      bundle,
+      (int)cubemap->width / pow(2, level),
+      (int)cubemap->height / pow(2, level),
+      4,
+      (float *)staging_memory_pointer);
 
   VK_CHECK(vkDeviceWaitIdle(g_device));
   vmaDestroyBuffer(g_gpu_allocator, staging_buffer, staging_allocation);
 }
 
+void env_file_write(
+    const char *path,
+    cubemap_t *skybox_cubemap,
+    cubemap_t *irradiance_cubemap,
+    cubemap_t *radiance_cubemap) {
+  assert(ENV_MAX_RADIANCE_MIPMAPS >= radiance_cubemap->mip_levels);
+
+  env_file_header_t header = {};
+  header.radiance_mip_count = radiance_cubemap->mip_levels;
+
+  unsigned char *skybox_layer_datas[6];
+  unsigned char *irradiance_layer_datas[6];
+  unsigned char *radiance_layer_datas[ENV_MAX_RADIANCE_MIPMAPS][6];
+
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    env_save_bundle_t bundle = {.size = 0, .cap = 0, .data = NULL};
+    save_cubemap_mem(skybox_cubemap, &bundle, layer, 0);
+    header.skybox_layer_sizes[layer] = bundle.size;
+    skybox_layer_datas[layer] = bundle.data;
+  }
+
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    env_save_bundle_t bundle = {.size = 0, .cap = 0, .data = NULL};
+    save_cubemap_mem(irradiance_cubemap, &bundle, layer, 0);
+    header.irradiance_layer_sizes[layer] = bundle.size;
+    irradiance_layer_datas[layer] = bundle.data;
+  }
+
+  for (uint32_t level = 0; level < header.radiance_mip_count; level++) {
+    for (uint32_t layer = 0; layer < 6; layer++) {
+      env_save_bundle_t bundle = {.size = 0, .cap = 0, .data = NULL};
+      save_cubemap_mem(radiance_cubemap, &bundle, layer, level);
+      header.radiance_layer_sizes[level][layer] = bundle.size;
+      radiance_layer_datas[level][layer] = bundle.data;
+    }
+  }
+
+  size_t file_size = sizeof(header);
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    file_size += header.skybox_layer_sizes[layer];
+    file_size += header.irradiance_layer_sizes[layer];
+  }
+  for (uint32_t level = 0; level < header.radiance_mip_count; level++) {
+    for (uint32_t layer = 0; layer < 6; layer++) {
+      file_size += header.radiance_layer_sizes[level][layer];
+    }
+  }
+
+  unsigned char *data = calloc(1, file_size);
+  memcpy(data, &header, sizeof(header));
+
+  size_t current_pos = sizeof(header);
+
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    size_t layer_size = header.skybox_layer_sizes[layer];
+    memcpy(&data[current_pos], skybox_layer_datas[layer], layer_size);
+    current_pos += layer_size;
+  }
+
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    size_t layer_size = header.irradiance_layer_sizes[layer];
+    memcpy(&data[current_pos], irradiance_layer_datas[layer], layer_size);
+    current_pos += layer_size;
+  }
+
+  for (uint32_t level = 0; level < header.radiance_mip_count; level++) {
+    for (uint32_t layer = 0; layer < 6; layer++) {
+      size_t layer_size = header.radiance_layer_sizes[level][layer];
+      memcpy(
+          &data[current_pos], radiance_layer_datas[level][layer], layer_size);
+      current_pos += layer_size;
+    }
+  }
+
+  FILE *file = fopen(path, "w+");
+
+  fwrite(data, file_size, 1, file);
+
+  fclose(file);
+
+  free(data);
+
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    free(skybox_layer_datas[layer]);
+  }
+
+  for (uint32_t layer = 0; layer < 6; layer++) {
+    free(irradiance_layer_datas[layer]);
+  }
+
+  for (uint32_t level = 0; level < header.radiance_mip_count; level++) {
+    for (uint32_t layer = 0; layer < 6; layer++) {
+      free(radiance_layer_datas[level][layer]);
+    }
+  }
+}
+
 int main(int argc, char *argv[]) {
-  if (argc <= 1) {
+  if (argc <= 2) {
     // TODO: print help
-    printf(
-        "Usage: %s <path-to-skybox.hdr> [skybox prefix] [irradiance prefix] "
-        "[radiance prefix]\n",
-        argv[0]);
+    printf("Usage: %s <path-to-equirec.hdr> <path-to-output.env>\n", argv[0]);
     return 0;
-  }
-
-  char *skybox_prefix = "skybox";
-  char *irradiance_prefix = "irradiance";
-  char *radiance_prefix = "radiance";
-  char *prefix = "";
-
-  if (argc >= 3) {
-    prefix = argv[2];
-  }
-
-  if (argc >= 4) {
-    skybox_prefix = argv[3];
-  }
-
-  if (argc >= 5) {
-    irradiance_prefix = argv[4];
-  }
-
-  if (argc >= 6) {
-    radiance_prefix = argv[5];
   }
 
   vulkan_setup();
 
-  char *path = argv[1];
+  char *in_path = argv[1];
+  char *out_path = argv[2];
   uint32_t width = 512;
   uint32_t height = 512;
 
@@ -2279,55 +2360,45 @@ int main(int argc, char *argv[]) {
   cubemap_t skybox_cubemap;
   cubemap_init_skybox_from_hdr_equirec(
       &skybox_cubemap,
-      path,
+      in_path,
       width,
       height,
       "../shaders/out/skybox.vert.spv",
       "../shaders/out/skybox.frag.spv");
   printf("Done rendering skybox\n");
 
-  save_cubemap(&skybox_cubemap, prefix, skybox_prefix);
-  printf("Done saving skybox\n");
-
   // Irradiance
-  {
-    cubemap_t irradiance_cubemap;
-    cubemap_init_irradiance_from_skybox(
-        &irradiance_cubemap,
-        &skybox_cubemap,
-        64,
-        64,
-        "../shaders/out/skybox.vert.spv",
-        "../shaders/out/irradiance.frag.spv");
-    printf("Done rendering irradiance\n");
-
-    save_cubemap(&irradiance_cubemap, prefix, irradiance_prefix);
-    printf("Done saving irradiance\n");
-
-    cubemap_destroy(&irradiance_cubemap);
-  }
+  cubemap_t irradiance_cubemap;
+  cubemap_init_irradiance_from_skybox(
+      &irradiance_cubemap,
+      &skybox_cubemap,
+      64,
+      64,
+      "../shaders/out/skybox.vert.spv",
+      "../shaders/out/irradiance.frag.spv");
+  printf("Done rendering irradiance\n");
 
   // Radiance
-  {
-    uint32_t radiance_dim = 256;
-    uint32_t radiance_mip_count = floor(log2(radiance_dim)) + 1;
-    cubemap_t radiance_cubemap;
-    cubemap_init_radiance_from_skybox(
-        &radiance_cubemap,
-        &skybox_cubemap,
-        radiance_dim,
-        radiance_dim,
-        "../shaders/out/skybox.vert.spv",
-        "../shaders/out/radiance.frag.spv",
-        radiance_mip_count);
-    printf("Done rendering radiance with %d mip levels\n", radiance_mip_count);
+  uint32_t radiance_dim = 256;
+  uint32_t radiance_mip_count = floor(log2(radiance_dim)) + 1;
+  cubemap_t radiance_cubemap;
+  cubemap_init_radiance_from_skybox(
+      &radiance_cubemap,
+      &skybox_cubemap,
+      radiance_dim,
+      radiance_dim,
+      "../shaders/out/skybox.vert.spv",
+      "../shaders/out/radiance.frag.spv",
+      radiance_mip_count);
+  printf("Done rendering radiance with %d mip levels\n", radiance_mip_count);
 
-    save_cubemap(&radiance_cubemap, prefix, radiance_prefix);
-    printf("Done saving radiance\n");
+  env_file_write(
+      out_path, &skybox_cubemap, &irradiance_cubemap, &radiance_cubemap);
 
-    cubemap_destroy(&radiance_cubemap);
-  }
+  printf("Done saving output at %s\n", out_path);
 
+  cubemap_destroy(&irradiance_cubemap);
+  cubemap_destroy(&radiance_cubemap);
   cubemap_destroy(&skybox_cubemap);
 
   vulkan_teardown();

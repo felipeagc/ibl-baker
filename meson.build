@@ -12,4 +12,8 @@ deps = [
   cc.find_library('m', required : false)
 ]
 
-executable('ibl_baker', sources, dependencies: deps)
+executable(
+  'ibl_baker',
+  sources,
+  include_directories: include_directories('src'),
+  dependencies: deps)
